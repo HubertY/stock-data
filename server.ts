@@ -1,4 +1,3 @@
-
 import express from "express";
 import request from "request-promise";
 import * as cheerio from "cheerio";
@@ -7,19 +6,22 @@ const CACHE: Record<string, string> = {};
 
 export async function grab(ticker: string) {
     let ret = {} as Record<string, string>;
-    const s = `https://finance.yahoo.com/quote/${ticker}/key-statistics?p=${ticker}`
-    const data = await request(s);
-    const $ = cheerio.load(data);
-    for (const node of $("script")) {
-        $(node).remove();
-    }
-    for (const node of $("tr")) {
-        const cells = $(node).find("td");
-        if (cells.length >= 2) {
-            const attr = $(cells[0]).text();
-            const val = $(cells[1]).text();
-            if (attr && val) {
-                ret[attr.trim()] = val.trim();
+    const ss = [`https://finance.yahoo.com/quote/${ticker}`,
+    `https://finance.yahoo.com/quote/${ticker}/key-statistics?p=${ticker}`]
+    for (const s of ss) {
+        const data = await request(s);
+        const $ = cheerio.load(data);
+        for (const node of $("script")) {
+            $(node).remove();
+        }
+        for (const node of $("tr")) {
+            const cells = $(node).find("td");
+            if (cells.length >= 2) {
+                const attr = $(cells[0]).text();
+                const val = $(cells[1]).text();
+                if (attr && val) {
+                    ret[attr.trim()] = val.trim();
+                }
             }
         }
     }

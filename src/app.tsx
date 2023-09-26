@@ -1,11 +1,10 @@
-import { Dispatch, useContext, useEffect, useReducer, useState } from 'preact/hooks'
+import { Dispatch, useEffect, useReducer, useState } from 'preact/hooks'
 import './app.css'
-import { createContext, } from 'preact'
-import { signal, useSignal } from "@preact/signals";
+import { ReadonlySignal, computed, signal, useSignal } from "@preact/signals";
 
 class Pile<T> {
   data: Record<string, T> = {};
-  make: () => T;
+  make: (key: string) => T;
   *[Symbol.iterator]() {
     for (const x of Object.entries(this.data)) {
       yield x;
@@ -13,14 +12,14 @@ class Pile<T> {
   }
   get(key: string) {
     if (!this.data[key]) {
-      this.data[key] = this.make();
+      this.data[key] = this.make(key);
     }
     return this.data[key];
   }
   set(key: string, val: T) {
     this.data[key] = val;
   }
-  constructor(make: () => T) {
+  constructor(make: (key: string) => T) {
     this.make = make;
   }
 }
@@ -57,33 +56,90 @@ const colReducer = (state: ColState, action: ColAction) => {
   throw Error("nope");
 };
 
-const stuff = { data: new Pile(() => new Pile(() => signal("..."))), requested: new Pile(() => false) };
-const Data = createContext(stuff);
+type Mappify<T, X> = { [K in keyof T]: X };
+function parse(s: string): number {
+  if (s === "...") {
+    return NaN;
+  }
+  if (s.endsWith("%")) {
+    return parseFloat(s.slice(0, -1)) / 100;
+  }
+  if (s.endsWith("M")) {
+    return parseFloat(s.slice(0, -1)) * 1000000;
+  }
+  if (s.endsWith("B")) {
+    return parseFloat(s.slice(0, -1)) * 1000000000;
+  }
+  if (s.endsWith("T")) {
+    return parseFloat(s.slice(0, -1)) * 1000000000000;
+  }
+  // const asDate = Date.parse(s);
+  // if (!isNaN(asDate)) {
+  //   return asDate;
+  // }
+  return parseFloat(s);
+}
 
-function tryFetchTicker(tick: string, data: typeof stuff, force = false) {
-  data.requested.set(tick, true);
+const data = new Pile(() => new Pile(() => signal("...")));
+const requested = new Pile(() => false);
+
+function makeDerivedPile<T extends number[]>(fn: (...args: T) => number, deps: Mappify<T, string>) {
+  const ffn = (...args: Mappify<T, string>) => {
+    const is = args.map(parse);
+    return fn(...is as T);
+  };
+  return new Pile((ticker) => {
+    return computed(() => ffn(...deps.map(s => data.get(ticker).get(s).value) as Mappify<T, string>));
+  });
+
+}
+
+
+const RISK_FREE_RATE = 0.04; // 30 year treasury rate
+const MARKET_RATE = 0.092 // ten-year average return of stock market over 140 years
+function CAPM(beta: number) {
+  return (RISK_FREE_RATE + beta * (MARKET_RATE - RISK_FREE_RATE));
+}
+
+// function capmPrice(beta: number, eps: number, growth: number) {
+//   const expectedrate = (RISK_FREE_RATE + beta * (MARKET_RATE - RISK_FREE_RATE));
+//   if (growth >= expectedrate) {
+//     return Infinity;
+//   }
+//   const p = (eps * (1 + growth) / (expectedrate - growth));
+//   return p;
+// }
+
+const DerivedRows = {
+  computedprice: makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
+  capm: makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
+  //capmPrice: makeDerivedPile(capmPrice, ["Beta (5Y Monthly)", "EPS (TTM)", "Quarterly Earnings Growth (yoy)"])
+} as Record<string, Pile<ReadonlySignal<number>>>;
+
+
+function tryFetchTicker(tick: string, force = false) {
+  requested.set(tick, true);
   const ret = fetch(`/endpoint?ticker=${tick}&nocache=${force}`).then(data => data.json()).then((item: Record<string, string>) => {
     for (const [k, v] of Object.entries(item)) {
-      data.data.get(tick).get(k).value = v;
+      data.get(tick).get(k).value = v;
     }
     return item;
   })
   ret.catch(() => {
-    data.requested.set(tick, false);
+    requested.set(tick, false);
   });
   return ret;
 }
 
 function ColHeader({ s, i, dispatchCols, selected = false }: { s: string, i: number, dispatchCols: Dispatch<ColAction>, selected: boolean }) {
-  const data = useContext(Data);
   return <>
     <th onClick={() => {
       dispatchCols({ type: "selectCol", index: i });
     }}>{s} {selected && <>
       <button onClick={
         () => {
-          tryFetchTicker(s, data, true);
-          for (const [_, v] of data.data.get(s)) {
+          tryFetchTicker(s, true);
+          for (const [_, v] of data.get(s)) {
             v.value = "...";
           }
         }
@@ -120,8 +176,6 @@ function ColTopRow({ cols, selectedCols, dispatchCols }: { cols: string[], selec
 }
 
 function DataTable({ allRows = [] as string[], allCols = [] as string[], saved = {} as Record<string, string[]> }) {
-  const data = useContext(Data);
-
   const [savedGroups, setSavedGroups] = useState(saved);
   const [rows, dispatchRows] = useReducer(rowReducer, allRows);
   const [{ cols, selectedCols }, dispatchCols] = useReducer(colReducer, { cols: allCols, selectedCols: -1 });
@@ -131,8 +185,8 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
   useEffect(() => {
     localStorage.setItem("cols", JSON.stringify(cols));
     for (const col of cols) {
-      if (!data.requested.get(col)) {
-        tryFetchTicker(col, data).then((item) => {
+      if (!requested.get(col)) {
+        tryFetchTicker(col).then((item) => {
           dispatchRows({ type: "addNewRows", item })
         })
       }
@@ -170,13 +224,19 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
           }}>💾</button>
         </th>
       </tr>
+      {
+        Object.entries(DerivedRows).map(([k, v]) => (
+          <tr key={k}>
+            <th>{k}</th>
+            {cols.map(col => <td key={col}>{v.get(col).value.toFixed(2)}</td>)}
+          </tr>))
+      }
       {rows.map(attr => (
         <tr key={attr}>
           <th>{attr}</th>
-          {cols.map(col => <td key={col}>{data.data.get(col).get(attr).value}</td>)}
+          {cols.map(col => <td key={col}>{data.get(col).get(attr).value}</td>)}
         </tr>
-      ))};
-
+      ))}
     </table>
 
   </>
@@ -189,8 +249,6 @@ export function App() {
   const _savedSaved = localStorage.getItem("saved");
   const savedSaved = _savedSaved && JSON.parse(_savedSaved);
   return (
-    <Data.Provider value={stuff}>
-      <DataTable allRows={[]} allCols={savedCols ?? defaultCols} saved={savedSaved ?? {}} />
-    </Data.Provider>
+    <DataTable allRows={[]} allCols={savedCols ?? defaultCols} saved={savedSaved ?? {}} />
   )
 }
