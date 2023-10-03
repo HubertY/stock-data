@@ -166,7 +166,7 @@ function shallowComp<T>(a1: T[], a2: T[]) {
 
 function ColHeader({ s, i, dispatchCols }: { s: string, i: number, dispatchCols: Dispatch<ColAction> }) {
   return <>
-    <th onClick={() => {
+    <th class="clickable" onClick={() => {
       selectedCell.value = [null, s];
     }}>{s} {(shallowComp(selectedCell.value, [null, s]) || shifted.value) && <>
       <button onClick={
@@ -190,7 +190,7 @@ function ColTopRow({ cols, dispatchCols }: { cols: string[], dispatchCols: Dispa
 }
 
 function DataCell({ col, row }: { col: string, row: string }) {
-  return <td onClick={() => {
+  return <td class="clickable" onClick={() => {
     selectedCell.value = [row, col];
   }}>
     {data.get(col).get(row).value}

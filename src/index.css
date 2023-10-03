@@ -73,3 +73,12 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+.clickable {
+  background-color: #e8e8e8;
+  cursor: pointer;
+}
+
+.clickable:hover {
+  background-color: #c3cbe4;
+}
