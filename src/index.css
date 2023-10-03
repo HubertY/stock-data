@@ -74,8 +74,20 @@ button:focus-visible {
   }
 }
 
-.clickable {
+.derived {
   background-color: #e8e8e8;
+}
+
+.dependent {
+  background-color: #c3cbe4;
+}
+
+.selected {
+  background-color: #c3cbe4;
+}
+
+
+.clickable {
   cursor: pointer;
 }
 

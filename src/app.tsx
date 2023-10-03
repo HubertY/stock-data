@@ -1,6 +1,7 @@
 import { Dispatch, useEffect, useReducer, useState } from 'preact/hooks'
 import './app.css'
 import { ReadonlySignal, computed, signal } from "@preact/signals";
+import classNames from 'classnames';
 
 class Pile<T> {
   data: Record<string, T> = {};
@@ -103,16 +104,17 @@ const modified = new Pile(() => new Pile(() => signal("")));
 const truth = new Pile(() => new Pile(() => signal("...")));
 const requested = new Pile(() => false);
 
-
+type DerivedPile<T> = Pile<T> & { dependencies: string[] }
 function makeDerivedPile<T extends number[]>(fn: (...args: T) => number, deps: Mappify<T, string>) {
   const ffn = (...args: Mappify<T, string>) => {
     const is = args.map(parse);
     return fn(...is as T);
   };
-  return new Pile((ticker) => {
+  const ret = new Pile((ticker) => {
     return computed(() => ffn(...deps.map(s => data.get(ticker).get(s).value) as Mappify<T, string>));
-  });
-
+  }) as DerivedPile<ReadonlySignal<number>>;
+  ret.dependencies = deps;
+  return ret;
 }
 
 
@@ -135,7 +137,7 @@ const DerivedRows = {
   "price (computed)": makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
   capm: makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
   //capmPrice: makeDerivedPile(capmPrice, ["Beta (5Y Monthly)", "EPS (TTM)", "Quarterly Earnings Growth (yoy)"])
-} as Record<string, Pile<ReadonlySignal<number>>>;
+} as Record<string, DerivedPile<ReadonlySignal<number>>>;
 
 
 function tryFetchTicker(tick: string, force = false) {
@@ -190,21 +192,42 @@ function ColTopRow({ cols, dispatchCols }: { cols: string[], dispatchCols: Dispa
 }
 
 function DataCell({ col, row }: { col: string, row: string }) {
-  return <td class="clickable" onClick={() => {
+  const [srow, scol] = selectedCell.value;
+  const valueWasModified = modified.get(col).get(row).value !== "";
+  const cellIsSelected = col === scol && row === srow;
+  const rowIsDependency = srow && DerivedRows[srow] && DerivedRows[srow].dependencies.includes(row);
+  return <td class={classNames("clickable", {
+    "selected": cellIsSelected,
+    "dependent": rowIsDependency
+  })} onClick={() => {
     selectedCell.value = [row, col];
   }}>
     {data.get(col).get(row).value}
-    {modified.get(col).get(row).value !== "" && <button onClick={(e) => {
+    {valueWasModified && <button onClick={(e) => {
       e.stopPropagation();
       modified.get(col).get(row).value = "";
     }}>🚮</button>}
-    {
-      (shallowComp(selectedCell.value, [row, col]) || shifted.value) && modified.get(col).get(row).value === "" && <button onClick={(e) => {
+    {!valueWasModified
+      && (
+        cellIsSelected
+        || col === scol && rowIsDependency
+        || shifted.value)
+      && <button onClick={(e) => {
         e.stopPropagation();
         const s = prompt("choose a new value:");
         s && (modified.get(col).get(row).value = s);
       }}>✍️</button>
     }
+  </td >
+}
+
+function DerivedDataCell({ col, row }: { col: string, row: string }) {
+  const [srow, scol] = selectedCell.value;
+  const cellIsSelected = col === scol && row === srow;
+  return <td class={classNames("clickable", "derived", { "selected": cellIsSelected })} onClick={() => {
+    selectedCell.value = [row, col];
+  }}>
+    {DerivedRows[row].get(col).value.toFixed(2)}
   </td >
 }
 
@@ -258,10 +281,10 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
         </th>
       </tr>
       {
-        Object.entries(DerivedRows).map(([k, v]) => (
+        Object.keys(DerivedRows).map((k) => (
           <tr key={k}>
             <th>{k}</th>
-            {cols.map(col => <td key={col}>{v.get(col).value.toFixed(2)}</td>)}
+            {cols.map(col => <DerivedDataCell key={col} col={col} row={k} />)}
           </tr>))
       }
       {rows.map(attr => (
