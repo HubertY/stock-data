@@ -1,6 +1,6 @@
 import { Dispatch, useEffect, useReducer, useState } from 'preact/hooks'
 import './app.css'
-import { ReadonlySignal, computed, signal, useSignal } from "@preact/signals";
+import { ReadonlySignal, computed, signal } from "@preact/signals";
 
 class Pile<T> {
   data: Record<string, T> = {};
@@ -33,28 +33,43 @@ const rowReducer = (state: string[], action: { type: "addNewRows", item: Record<
 
 type AppendColAction = { type: "appendCol", item: string };
 type DeleteColAction = { type: "deleteCol", index: number };
-type SelectColAction = { type: "selectCol", index: number };
 type SetColAction = { type: "setCols", val: string[] };
-type ColAction = AppendColAction | DeleteColAction | SelectColAction | SetColAction;
-type ColState = { cols: string[], selectedCols: number };
+type ColAction = AppendColAction | DeleteColAction | SetColAction;
+type ColState = string[];
 const colReducer = (state: ColState, action: ColAction) => {
-  let { cols, selectedCols } = state;
+  let cols = state;
   if (action.type === "appendCol") {
-    return { cols: cols.concat(action.item), selectedCols };
+    if (cols.includes(action.item)) {
+      return cols;
+    }
+    return cols.concat(action.item);
   }
   else if (action.type === "deleteCol") {
-    return {
-      cols: cols.slice(0, action.index).concat(cols.slice(action.index + 1)), selectedCols: -1
-    };
-  }
-  else if (action.type === "selectCol") {
-    return { cols, selectedCols: action.index };
+    return cols.slice(0, action.index).concat(cols.slice(action.index + 1));
   }
   else if (action.type === "setCols") {
-    return { cols: action.val, selectedCols: -1 };
+    return action.val;
   }
   throw Error("nope");
 };
+
+const selectedCell = signal<[null | string, null | string]>([null, null]);
+const shifted = signal(false);
+
+window.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Shift") {
+    shifted.value = true;
+  }
+  else if (e.key === "Escape") {
+    selectedCell.value = [null, null];
+  }
+});
+window.addEventListener("keyup", (e: KeyboardEvent) => {
+  if (e.key === "Shift") {
+    shifted.value = false;
+  }
+});
+
 
 type Mappify<T, X> = { [K in keyof T]: X };
 function parse(s: string): number {
@@ -80,8 +95,14 @@ function parse(s: string): number {
   return parseFloat(s);
 }
 
-const data = new Pile(() => new Pile(() => signal("...")));
+const data = new Pile((ticker) => new Pile((row) => computed(() => {
+  const x = modified.get(ticker).get(row).value;
+  return x !== "" ? x : truth.get(ticker).get(row).value;
+})));
+const modified = new Pile(() => new Pile(() => signal("")));
+const truth = new Pile(() => new Pile(() => signal("...")));
 const requested = new Pile(() => false);
+
 
 function makeDerivedPile<T extends number[]>(fn: (...args: T) => number, deps: Mappify<T, string>) {
   const ffn = (...args: Mappify<T, string>) => {
@@ -111,7 +132,7 @@ function CAPM(beta: number) {
 // }
 
 const DerivedRows = {
-  computedprice: makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
+  "price (computed)": makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
   capm: makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
   //capmPrice: makeDerivedPile(capmPrice, ["Beta (5Y Monthly)", "EPS (TTM)", "Quarterly Earnings Growth (yoy)"])
 } as Record<string, Pile<ReadonlySignal<number>>>;
@@ -121,7 +142,7 @@ function tryFetchTicker(tick: string, force = false) {
   requested.set(tick, true);
   const ret = fetch(`/endpoint?ticker=${tick}&nocache=${force}`).then(data => data.json()).then((item: Record<string, string>) => {
     for (const [k, v] of Object.entries(item)) {
-      data.get(tick).get(k).value = v;
+      truth.get(tick).get(k).value = v;
     }
     return item;
   })
@@ -131,15 +152,27 @@ function tryFetchTicker(tick: string, force = false) {
   return ret;
 }
 
-function ColHeader({ s, i, dispatchCols, selected = false }: { s: string, i: number, dispatchCols: Dispatch<ColAction>, selected: boolean }) {
+function shallowComp<T>(a1: T[], a2: T[]) {
+  if (a1.length != a2.length) {
+    return false;
+  }
+  for (let i = a1.length; i--;) {
+    if (a1[i] !== a2[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function ColHeader({ s, i, dispatchCols }: { s: string, i: number, dispatchCols: Dispatch<ColAction> }) {
   return <>
     <th onClick={() => {
-      dispatchCols({ type: "selectCol", index: i });
-    }}>{s} {selected && <>
+      selectedCell.value = [null, s];
+    }}>{s} {(shallowComp(selectedCell.value, [null, s]) || shifted.value) && <>
       <button onClick={
         () => {
           tryFetchTicker(s, true);
-          for (const [_, v] of data.get(s)) {
+          for (const [_, v] of truth.get(s)) {
             v.value = "...";
           }
         }
@@ -152,33 +185,33 @@ function ColHeader({ s, i, dispatchCols, selected = false }: { s: string, i: num
   </>
 }
 
-function ColTopRow({ cols, selectedCols, dispatchCols }: { cols: string[], selectedCols: number, dispatchCols: Dispatch<ColAction> }) {
-  const shifted = useSignal(false);
-  useEffect(() => {
-    const kdlisten = (e: KeyboardEvent) => {
-      if (e.key === "Shift") {
-        shifted.value = true;
-      }
-    };
-    const kulisten = (e: KeyboardEvent) => {
-      if (e.key === "Shift") {
-        shifted.value = false;
-      }
+function ColTopRow({ cols, dispatchCols }: { cols: string[], dispatchCols: Dispatch<ColAction> }) {
+  return <>{cols.map((s, i) => <ColHeader key={s} s={s} i={i} dispatchCols={dispatchCols} />)}</>;
+}
+
+function DataCell({ col, row }: { col: string, row: string }) {
+  return <td onClick={() => {
+    selectedCell.value = [row, col];
+  }}>
+    {data.get(col).get(row).value}
+    {modified.get(col).get(row).value !== "" && <button onClick={(e) => {
+      e.stopPropagation();
+      modified.get(col).get(row).value = "";
+    }}>🚮</button>}
+    {
+      (shallowComp(selectedCell.value, [row, col]) || shifted.value) && modified.get(col).get(row).value === "" && <button onClick={(e) => {
+        e.stopPropagation();
+        const s = prompt("choose a new value:");
+        s && (modified.get(col).get(row).value = s);
+      }}>✍️</button>
     }
-    window.addEventListener("keydown", kdlisten);
-    window.addEventListener("keyup", kulisten);
-    return () => {
-      window.removeEventListener("keydown", kdlisten);
-      window.removeEventListener("keyup", kulisten);
-    }
-  }, [shifted]);
-  return <>{cols.map((s, i) => <ColHeader key={s} s={s} i={i} selected={shifted.value || selectedCols === i} dispatchCols={dispatchCols} />)}</>;
+  </td >
 }
 
 function DataTable({ allRows = [] as string[], allCols = [] as string[], saved = {} as Record<string, string[]> }) {
   const [savedGroups, setSavedGroups] = useState(saved);
   const [rows, dispatchRows] = useReducer(rowReducer, allRows);
-  const [{ cols, selectedCols }, dispatchCols] = useReducer(colReducer, { cols: allCols, selectedCols: -1 });
+  const [cols, dispatchCols] = useReducer(colReducer, allCols);
   useEffect(() => {
     localStorage.setItem("saved", JSON.stringify(savedGroups));
   }, [savedGroups]);
@@ -208,7 +241,7 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
     <table>
       <tr>
         <th></th>
-        <ColTopRow cols={cols} selectedCols={selectedCols} dispatchCols={dispatchCols} />
+        <ColTopRow cols={cols} dispatchCols={dispatchCols} />
         <th>
           <button onClick={() => {
             const tick = prompt("ticker name?");
@@ -234,7 +267,7 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
       {rows.map(attr => (
         <tr key={attr}>
           <th>{attr}</th>
-          {cols.map(col => <td key={col}>{data.get(col).get(attr).value}</td>)}
+          {cols.map(col => <DataCell key={col} col={col} row={attr} />)}
         </tr>
       ))}
     </table>
