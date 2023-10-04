@@ -82,6 +82,10 @@ function parse(s: string | number): number {
   if (typeof s === "number") {
     return s;
   }
+  if (typeof s !== "string") {
+    console.log(s);
+    throw "stoppu";
+  }
   if (s === "...") {
     return NaN;
   }
@@ -119,9 +123,13 @@ function makeDerivedPile<T extends number[]>(fn: (...args: T) => number, deps: M
     return fn(...is as T);
   };
   const ret = new Pile((ticker) => {
-    return computed(() => ffn(...deps.map(s => data.get(ticker).get(s).value) as Mappify<T, string>));
+    return computed(() => ffn(...deps.map(row => DerivedRows[row] ? DerivedRows[row].get(ticker).value : data.get(ticker).get(row).value) as Mappify<T, string>));
   }) as DerivedPile<ReadonlySignal<number>>;
-  ret.dependencies = deps;
+  Object.defineProperty(ret, "dependencies", {
+    get() {
+      return deps.flatMap(dep => DerivedRows[dep] ? DerivedRows[dep].dependencies : dep);;
+    },
+  });
   return ret;
 }
 
@@ -141,11 +149,21 @@ function CAPM(beta: number) {
 //   return p;
 // }
 
+function dcf(ocf: number, growth: number, wacc: number, t: number) {
+  let ret = 0;
+  for (let i = 1; i <= t; i++) {
+    ret += ocf * Math.pow(1 + growth, i) / Math.pow(1 + wacc, i);
+  }
+  return ret / (1 - 1 / Math.pow(1 + wacc, t));
+}
+
 const DerivedRows = {
   "price (computed)": makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
-  capm: makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
-  "growth / capm": makeDerivedPile((beta, growth) => (1 + growth) / (1 + CAPM(beta)), ["Beta (5Y Monthly)", "Quarterly Earnings Growth (yoy)"]),
-  "log growth / log capm": makeDerivedPile((beta, growth) => Math.log(1 + growth) / Math.log(1 + CAPM(beta)), ["Beta (5Y Monthly)", "Quarterly Earnings Growth (yoy)"]),
+  "capm": makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
+  "earngrowth / capm": makeDerivedPile((capm, growth) => (1 + growth) / (1 + capm), ["capm", "Quarterly Earnings Growth (yoy)"]),
+  "log earngrowth / log capm": makeDerivedPile((capm, growth) => Math.log(1 + growth) / Math.log(1 + capm), ["capm", "Quarterly Earnings Growth (yoy)"]),
+  "10y dcf price": makeDerivedPile((ocf, growth, wacc, s) => dcf(ocf, growth, wacc, 10) / s, ["Operating Cash Flow (ttm)", "Quarterly Earnings Growth (yoy)", "capm", "Implied Shares Outstanding 6"]),
+  "dcf actual/theoretical": makeDerivedPile((a, b) => a / b, ["Open", "10y dcf price"])
   //capmPrice: makeDerivedPile(capmPrice, ["Beta (5Y Monthly)", "EPS (TTM)", "Quarterly Earnings Growth (yoy)"])
 } as Record<string, DerivedPile<ReadonlySignal<number>>>;
 
