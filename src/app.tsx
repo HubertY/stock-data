@@ -35,7 +35,8 @@ const rowReducer = (state: string[], action: { type: "addNewRows", item: Record<
 type AppendColAction = { type: "appendCol", item: string };
 type DeleteColAction = { type: "deleteCol", index: number };
 type SetColAction = { type: "setCols", val: string[] };
-type ColAction = AppendColAction | DeleteColAction | SetColAction;
+type SortColAction = { type: "sortCols", sorter: (col: string) => number, reverse?: boolean }
+type ColAction = AppendColAction | DeleteColAction | SetColAction | SortColAction;
 type ColState = string[];
 const colReducer = (state: ColState, action: ColAction) => {
   let cols = state;
@@ -50,6 +51,10 @@ const colReducer = (state: ColState, action: ColAction) => {
   }
   else if (action.type === "setCols") {
     return action.val;
+  }
+  else if (action.type === "sortCols") {
+    const sign = action.reverse ? -1 : 1;
+    return [...cols].sort((col1, col2) => sign * (action.sorter(col1) - action.sorter(col2)));
   }
   throw Error("nope");
 };
@@ -73,7 +78,10 @@ window.addEventListener("keyup", (e: KeyboardEvent) => {
 
 
 type Mappify<T, X> = { [K in keyof T]: X };
-function parse(s: string): number {
+function parse(s: string | number): number {
+  if (typeof s === "number") {
+    return s;
+  }
   if (s === "...") {
     return NaN;
   }
@@ -136,6 +144,8 @@ function CAPM(beta: number) {
 const DerivedRows = {
   "price (computed)": makeDerivedPile((mcap, shares) => mcap / shares, ["Market Cap (intraday)", "Implied Shares Outstanding 6"]),
   capm: makeDerivedPile(CAPM, ["Beta (5Y Monthly)"]),
+  "growth / capm": makeDerivedPile((beta, growth) => (1 + growth) / (1 + CAPM(beta)), ["Beta (5Y Monthly)", "Quarterly Earnings Growth (yoy)"]),
+  "log growth / log capm": makeDerivedPile((beta, growth) => Math.log(1 + growth) / Math.log(1 + CAPM(beta)), ["Beta (5Y Monthly)", "Quarterly Earnings Growth (yoy)"]),
   //capmPrice: makeDerivedPile(capmPrice, ["Beta (5Y Monthly)", "EPS (TTM)", "Quarterly Earnings Growth (yoy)"])
 } as Record<string, DerivedPile<ReadonlySignal<number>>>;
 
@@ -166,15 +176,17 @@ function shallowComp<T>(a1: T[], a2: T[]) {
   return true;
 }
 
-function ColHeader({ s, i, dispatchCols }: { s: string, i: number, dispatchCols: Dispatch<ColAction> }) {
-  return <>
-    <th class="clickable" onClick={() => {
-      selectedCell.value = [null, s];
-    }}>{s} {(shallowComp(selectedCell.value, [null, s]) || shifted.value) && <>
+function ColHeader({ col, i, dispatchCols }: { col: string, i: number, dispatchCols: Dispatch<ColAction> }) {
+  const [srow, scol] = selectedCell.value;
+  const colIsSelected = srow === null && scol === col;
+  return <th class={classNames("clickable", { "selected": colIsSelected })}
+    onClick={() => {
+      selectedCell.value = [null, col];
+    }}>{col} {(shallowComp(selectedCell.value, [null, col]) || shifted.value) && <>
       <button onClick={
         () => {
-          tryFetchTicker(s, true);
-          for (const [_, v] of truth.get(s)) {
+          tryFetchTicker(col, true);
+          for (const [_, v] of truth.get(col)) {
             v.value = "...";
           }
         }
@@ -184,20 +196,41 @@ function ColHeader({ s, i, dispatchCols }: { s: string, i: number, dispatchCols:
         dispatchCols({ type: "deleteCol", index: i });
       }}>🗑️</button>
     </>}</th>
-  </>
 }
 
-function ColTopRow({ cols, dispatchCols }: { cols: string[], dispatchCols: Dispatch<ColAction> }) {
-  return <>{cols.map((s, i) => <ColHeader key={s} s={s} i={i} dispatchCols={dispatchCols} />)}</>;
+function RowHeader({ rowName, sorter, dispatchCols }: { rowName: string, sorter: (col: string) => number, dispatchCols: Dispatch<ColAction> }) {
+  const [srow, scol] = selectedCell.value;
+  const rowIsSelected = srow === rowName && scol === null;
+  const rowIsDependency = srow && DerivedRows[srow] && DerivedRows[srow].dependencies.includes(rowName);
+  return <th
+    class={classNames("clickable", { "selected": rowIsSelected || rowIsDependency })}
+    onClick={() => {
+      selectedCell.value = [rowName, null];
+    }}>
+    {rowName}
+    {
+      rowIsSelected && <>
+        <button onClick={() => {
+          dispatchCols({ type: "sortCols", sorter, reverse: true });
+        }}>⬅️</button>
+        <button onClick={() => {
+          dispatchCols({ type: "sortCols", sorter, reverse: false });
+        }}>➡️</button>
+      </>
+    }
+
+  </th>
 }
 
 function DataCell({ col, row }: { col: string, row: string }) {
   const [srow, scol] = selectedCell.value;
   const valueWasModified = modified.get(col).get(row).value !== "";
-  const cellIsSelected = col === scol && row === srow;
+  const cellIsSelected = srow === row && scol === col;
+  const rowIsSelected = srow === row && scol === null;
+  const colIsSelected = srow === null && scol === col;
   const rowIsDependency = srow && DerivedRows[srow] && DerivedRows[srow].dependencies.includes(row);
   return <td class={classNames("clickable", {
-    "selected": cellIsSelected,
+    "selected": cellIsSelected || rowIsSelected || colIsSelected,
     "dependent": rowIsDependency
   })} onClick={() => {
     selectedCell.value = [row, col];
@@ -221,12 +254,18 @@ function DataCell({ col, row }: { col: string, row: string }) {
   </td >
 }
 
+
+
 function DerivedDataCell({ col, row }: { col: string, row: string }) {
   const [srow, scol] = selectedCell.value;
-  const cellIsSelected = col === scol && row === srow;
-  return <td class={classNames("clickable", "derived", { "selected": cellIsSelected })} onClick={() => {
-    selectedCell.value = [row, col];
-  }}>
+  const cellIsSelected = srow === row && scol === col;
+  const rowIsSelected = srow === row && scol === null;
+  const colIsSelected = srow === null && scol === col;
+  return <td
+    class={classNames("clickable", "derived", { "selected": cellIsSelected || rowIsSelected || colIsSelected })}
+    onClick={() => {
+      selectedCell.value = [row, col];
+    }}>
     {DerivedRows[row].get(col).value.toFixed(2)}
   </td >
 }
@@ -264,7 +303,7 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
     <table>
       <tr>
         <th></th>
-        <ColTopRow cols={cols} dispatchCols={dispatchCols} />
+        {cols.map((col, i) => <ColHeader key={col} col={col} i={i} dispatchCols={dispatchCols} />)}
         <th>
           <button onClick={() => {
             const tick = prompt("ticker name?");
@@ -283,13 +322,13 @@ function DataTable({ allRows = [] as string[], allCols = [] as string[], saved =
       {
         Object.keys(DerivedRows).map((k) => (
           <tr key={k}>
-            <th>{k}</th>
+            <RowHeader rowName={k} sorter={col => DerivedRows[k].get(col).value} dispatchCols={dispatchCols} />
             {cols.map(col => <DerivedDataCell key={col} col={col} row={k} />)}
           </tr>))
       }
       {rows.map(attr => (
         <tr key={attr}>
-          <th>{attr}</th>
+          <RowHeader rowName={attr} sorter={col => parse(data.get(col).get(attr).value)} dispatchCols={dispatchCols} />
           {cols.map(col => <DataCell key={col} col={col} row={attr} />)}
         </tr>
       ))}
